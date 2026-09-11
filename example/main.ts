@@ -125,8 +125,9 @@ startButton.addEventListener("click", async () => {
       `ID photo detect: ${debug.idPhotoDetectMs.toFixed(0)}ms | ` +
       `live capture detect: ${debug.liveCaptureDetectMs.toFixed(0)}ms | ` +
       `total: ${debug.totalMs.toFixed(0)}ms\n` +
-      `live capture angle: ${faceCapture.centered ? "centered" : "NOT centered (timed out waiting)"} ` +
-      `(yaw ${faceCapture.yawDeg.toFixed(0)}°, pitch ${faceCapture.pitchDeg.toFixed(0)}°)`;
+      `live capture readiness: ${faceCapture.ready ? "centered + neutral" : "NOT ready (timed out waiting)"} ` +
+      `(yaw ${faceCapture.yawDeg.toFixed(0)}°, pitch ${faceCapture.pitchDeg.toFixed(0)}°, ` +
+      `smile ${faceCapture.smileScore.toFixed(2)}, jaw open ${faceCapture.jawOpenScore.toFixed(2)})`;
     renderFaceCrop(idFaceCropEl, debug.idPhoto);
     renderFaceCrop(liveFaceCropEl, debug.liveCapture);
   } catch (err) {

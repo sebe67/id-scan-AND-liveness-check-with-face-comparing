@@ -17,7 +17,7 @@ face-match distance/boolean — is meant to reach your server.
 
 ## Status
 
-First real-device run: OCR and the camera/liveness flow both came up fine. Two real,
+First real-device run: OCR and the camera/liveness flow both came up fine. Three real,
 specific bugs have been found and fixed since, each via actual testing rather than
 guessing:
 
@@ -30,14 +30,17 @@ guessing:
    so there was no real reason to prefer the faster/sloppier one.
 2. Separately noticed: since the liveness challenge sequence is randomized and can end on
    a head turn, the live frame grabbed right after it finishes could catch the user
-   mid-turn - a profile view face-api can't get a good descriptor from. `verifyIdentity`
-   now waits briefly for a frontal face before capturing - see "Why wait for a frontal
-   face" below.
+   mid-turn - a profile view face-api can't get a good descriptor from.
+3. Confirmed via real testing: a big smile right at the end also failed the match, even
+   with the head perfectly centered - the recognition net isn't fully
+   expression-invariant. `verifyIdentity` now waits briefly for the user to look both
+   centered AND neutral (not smiling, mouth closed) before capturing - see "Why wait for
+   a centered, neutral face" below.
 
-**Not yet re-tested against a real ID/face pair with both fixes in place** - each fix is
-reasoned from a real, specific failure, not a guess, but neither has been confirmed
-against an actual run yet. Typechecks cleanly (`npm run build`) and is built from two
-already-verified pieces (id-ocr-web tested against real ID photos;
+**Not yet re-tested against a real ID/face pair with all fixes in place** - each fix is
+reasoned from a real, specific failure, not a guess, but none have been confirmed
+together against an actual run yet. Typechecks cleanly (`npm run build`) and is built
+from two already-verified pieces (id-ocr-web tested against real ID photos;
 liveness-check-web tested against a real camera). See Known Limitations below.
 
 ## Quick start
@@ -56,7 +59,7 @@ const result = await verifyIdentity(frontIdImage, video, {
 
 console.log(result.idOcr);       // OCR fields, same shape as id-ocr-web's PhIdOcrResult
 console.log(result.liveness);    // { passed, challenges: [...] }
-console.log(result.faceCapture); // { centered, yawDeg, pitchDeg } - was the live frame actually facing forward?
+console.log(result.faceCapture); // { ready, yawDeg, pitchDeg, smileScore, jawOpenScore } - was the live frame centered and neutral?
 console.log(result.faceMatch);   // { matched, distance, debug } | { matched: false, reason: "NO_FACE_IN_...", debug }
 ```
 
@@ -148,29 +151,41 @@ than in a real-time loop (unlike liveness's per-frame gesture detection, which d
 to be fast) — there's no real cost to using the more accurate detector for a one-shot
 call, only a bigger one-time download.
 
-## Why wait for a frontal face
+## Why wait for a centered, neutral face
 
 The liveness challenge sequence is randomized (`src/liveness/challenges/sequence.ts`) and
-can include TURN_LEFT/TURN_RIGHT. If it happens to end on one of those, grabbing the live
-frame the instant the sequence finishes can catch the user mid-turn — a profile view
-doesn't give face-api's recognition net anything close to what it needs, which was
-confirmed via real testing to produce a confident-looking but wrong "didn't match".
+can end on any of its challenges. Two real, separate bugs came from this:
 
-`verifyIdentity` now waits (up to 4 seconds, polling every ~80ms) for the user's yaw and
-pitch to both be within 15° of center before grabbing the frame - reusing
-`liveness/faceTracking.ts`'s own MediaPipe-based angle detection (the same thing
-`headTurn.ts` already computes for the turn challenges), not a new model or extra
-download. `onFaceCaptureStatus` fires once, right when this wait starts, so the UI can
-show something like "Look straight at the camera..." (the demo wires this to the same
-instruction text the challenges themselves use).
+- Ending on TURN_LEFT/TURN_RIGHT: grabbing the live frame the instant the sequence
+  finishes can catch the user mid-turn — a profile view doesn't give face-api's
+  recognition net anything close to what it needs. Confirmed via real testing to produce
+  a confident-looking but wrong "didn't match".
+- Ending on SMILE (or lingering from MOUTH_OPEN): also confirmed via real testing - a big
+  smile alone, with the head perfectly centered, was enough to fail the match. The
+  recognition net isn't fully expression-invariant, and a strong, asymmetric expression
+  measurably pushes the two descriptors apart, especially against a neutral-expression ID
+  photo (most ID photos require a neutral expression by policy).
 
-This always resolves - if the user never centers within the timeout, it proceeds anyway
-with whatever the last frame was, rather than blocking the flow indefinitely.
-`result.faceCapture.centered` says whether it actually succeeded, and
-`.yawDeg`/`.pitchDeg` show the angle of the frame that was actually used, so a future
-mismatch can be checked against this first before assuming the match itself is wrong.
-Not yet tuned against real users - the 15°/4s numbers are reasoned defaults (generous
-enough for a normal "turn back to center"), not validated ones.
+`verifyIdentity` now waits (up to 4 seconds, polling every ~80ms) for the user to look
+both centered (yaw/pitch within 15° of straight-on) AND neutral (no real smile, mouth
+closed) before grabbing the frame - reusing `liveness/faceTracking.ts`'s own
+MediaPipe-based angle and blendshape detection (the same signals `headTurn.ts`,
+`smile.ts`, and `mouthOpen.ts` already compute for their own challenges), not a new model
+or extra download. Once a frame first looks ready, it waits another 400ms and re-checks
+before actually using it, in case that first good-looking frame was just a fluke mid
+head-turn/expression transition. `onFaceCaptureStatus` fires once, right when the wait
+starts, so the UI can show something like "Look straight at the camera with a neutral
+expression..." (the demo wires this to the same instruction text the challenges
+themselves use).
+
+This always resolves - if the user never reaches a ready state within the timeout, it
+proceeds anyway with whatever the last frame was, rather than blocking the flow
+indefinitely. `result.faceCapture` reports `ready`, `yawDeg`/`pitchDeg`, and
+`smileScore`/`jawOpenScore` for the frame that was actually used, so a future mismatch
+can be checked against all of this first before assuming the match itself is wrong. None
+of these numbers (15°, the 0.3/0.2 expression thresholds, the 400ms settle, the 4s
+timeout) have been tuned against real users yet - they're reasoned defaults, not
+validated ones.
 
 ## Debugging a match result
 
@@ -250,12 +265,12 @@ guessing further from here.
 
 - **Face-match accuracy still needs a clean real-world confirmation.** Two real bugs have
   already been found and fixed via actual testing (wrong detector picking up the ID
-  card's logo instead of the photo; the live frame sometimes caught mid-head-turn), but
-  no run has yet gone through with both fixes in place. See Status above and "Debugging a
-  match result" for how to investigate a given run instead of guessing.
-- **The face-match threshold (0.6) and the frontal-face wait's angle/timeout (15°/4s)
-  are both generic starting points, not tuned for this use case.** See "How face matching
-  works" and "Why wait for a frontal face" above.
+  card's logo instead of the photo; the live frame sometimes caught mid-head-turn or
+  mid-smile), but no run has yet gone through with all fixes in place. See Status above
+  and "Debugging a match result" for how to investigate a given run instead of guessing.
+- **The face-match threshold (0.6) and the capture-readiness wait's angle/expression/
+  timing numbers are all generic starting points, not tuned for this use case.** See "How
+  face matching works" and "Why wait for a centered, neutral face" above.
 - **No anti-spoofing**, inherited from liveness-check-web - a photo or video replay could
   pass the liveness step, and a good enough photo could also pass the face-match step
   against the same ID. Fine for a low-risk use case, not a real fraud control as-is.

@@ -14,58 +14,112 @@ export interface VerifyIdentityOptions {
   faceMatch?: { matchThreshold?: number };
   /**
    * Fired once, right after the liveness sequence ends, while this function waits
-   * (briefly) for the user to be facing the camera again before grabbing the frame used
-   * for face matching - see FACE_CAPTURE_WAIT below. There's no equivalent event from
-   * liveness.onEvent, since this happens after the challenge sequence itself is done.
+   * (briefly) for the user to look centered and neutral again before grabbing the frame
+   * used for face matching - see waitForCaptureReadyFace below. There's no equivalent
+   * event from liveness.onEvent, since this happens after the challenge sequence itself
+   * is done.
    */
   onFaceCaptureStatus?: (message: string) => void;
+}
+
+export interface FaceCaptureReadiness {
+  /** False only if the wait timed out - the caller still gets whatever the last frame looked like, below. */
+  ready: boolean;
+  yawDeg: number;
+  pitchDeg: number;
+  /** max(mouthSmileLeft, mouthSmileRight) - how much of a smile was on the captured frame. */
+  smileScore: number;
+  /** jawOpen - how open the mouth was on the captured frame. */
+  jawOpenScore: number;
 }
 
 export interface VerifyIdentityResult {
   idOcr: PhIdOcrResult;
   liveness: LivenessResult;
-  /** Whether the frame used for face matching was actually facing the camera when it was grabbed - see waitForFrontalFace. */
-  faceCapture: { centered: boolean; yawDeg: number; pitchDeg: number };
+  /** What the frame used for face matching actually looked like when it was grabbed - see waitForCaptureReadyFace. */
+  faceCapture: FaceCaptureReadiness;
   faceMatch: FaceMatchOutcome;
 }
 
 // If the liveness sequence happens to end on a TURN_LEFT/TURN_RIGHT challenge, the frame
 // grabbed right after it finishes can be a profile view, which face-api can't produce a
 // good descriptor from - confirmed via real testing to cause a false "didn't match".
-// These bound how long verifyIdentity waits for the user to face forward again before
-// giving up and using whatever frame is available. Not yet tuned against real users -
-// generous enough that a normal "turn back to center" should comfortably finish inside
-// it, but this is a starting point like the other thresholds in this project.
+// A real test also caught the same problem from a big smile still lingering right after
+// a SMILE challenge: the recognition net isn't fully expression-invariant, and a strong,
+// asymmetric expression (smiling hard vs. a neutral ID photo) measurably pushes the two
+// descriptors apart. MOUTH_OPEN can distort the same way for the same reason. So this
+// waits for pose AND expression to both look neutral, not just pose.
 const FACE_CAPTURE_CENTER_THRESHOLD_DEG = 15;
+// These sit below each challenge's own "triggered" threshold (see smile.ts/mouthOpen.ts:
+// SMILE fires above 0.45, MOUTH_OPEN above 0.35) with a small margin, rather than being
+// the exact inverse - the same hysteresis-gap idea blink.ts already uses for its own
+// close/open thresholds, so a score sitting right at the boundary doesn't flicker.
+const FACE_CAPTURE_SMILE_NEUTRAL_THRESHOLD = 0.3;
+const FACE_CAPTURE_JAW_OPEN_NEUTRAL_THRESHOLD = 0.2;
 const FACE_CAPTURE_WAIT_TIMEOUT_MS = 4000;
 const FACE_CAPTURE_POLL_INTERVAL_MS = 80; // matches liveness's own default detection interval
+// Once a frame first looks centered and neutral, wait this long and re-check before
+// actually capturing - a single good-looking frame can be a fluke (mid-transition
+// between expressions, motion blur), and this costs very little given the wait is
+// already happening.
+const FACE_CAPTURE_SETTLE_MS = 400;
+
+function isCaptureReady(frame: FaceFrame): boolean {
+  const smile = Math.max(frame.blendshapes.mouthSmileLeft ?? 0, frame.blendshapes.mouthSmileRight ?? 0);
+  const jawOpen = frame.blendshapes.jawOpen ?? 0;
+  return (
+    frame.faceDetected &&
+    Math.abs(frame.yawDeg) < FACE_CAPTURE_CENTER_THRESHOLD_DEG &&
+    Math.abs(frame.pitchDeg) < FACE_CAPTURE_CENTER_THRESHOLD_DEG &&
+    smile < FACE_CAPTURE_SMILE_NEUTRAL_THRESHOLD &&
+    jawOpen < FACE_CAPTURE_JAW_OPEN_NEUTRAL_THRESHOLD
+  );
+}
+
+function toFaceCaptureReadiness(ready: boolean, frame: FaceFrame | undefined): FaceCaptureReadiness {
+  return {
+    ready,
+    yawDeg: frame?.yawDeg ?? 0,
+    pitchDeg: frame?.pitchDeg ?? 0,
+    smileScore: Math.max(frame?.blendshapes.mouthSmileLeft ?? 0, frame?.blendshapes.mouthSmileRight ?? 0),
+    jawOpenScore: frame?.blendshapes.jawOpen ?? 0,
+  };
+}
 
 /**
- * Polls the live video (reusing liveness's own MediaPipe-based yaw/pitch detection - no
- * new model, no extra download) until the user is facing roughly forward, or the timeout
- * elapses. Always resolves - on timeout, `centered` is false and the caller gets whatever
- * the last frame's angles were, so the flow never hard-blocks on this.
+ * Polls the live video (reusing liveness's own MediaPipe-based yaw/pitch/blendshape
+ * detection - no new model, no extra download) until the user looks centered AND
+ * neutral (not smiling, mouth closed), or the timeout elapses. Once a frame first looks
+ * ready, waits FACE_CAPTURE_SETTLE_MS and re-checks before accepting it, to avoid
+ * capturing a fluke single frame mid-transition. Always resolves - on timeout, `ready`
+ * is false and the caller gets whatever the last frame looked like, so the flow never
+ * hard-blocks on this.
  */
-async function waitForFrontalFace(
+async function waitForCaptureReadyFace(
   video: HTMLVideoElement,
   onStatus?: (message: string) => void
-): Promise<{ centered: boolean; yawDeg: number; pitchDeg: number }> {
-  onStatus?.("Look straight at the camera...");
+): Promise<FaceCaptureReadiness> {
+  onStatus?.("Look straight at the camera with a neutral expression...");
   const deadline = performance.now() + FACE_CAPTURE_WAIT_TIMEOUT_MS;
   let last: FaceFrame | undefined;
+
   while (performance.now() < deadline) {
     const frame = await detectFace(video, performance.now());
     last = frame;
-    if (
-      frame.faceDetected &&
-      Math.abs(frame.yawDeg) < FACE_CAPTURE_CENTER_THRESHOLD_DEG &&
-      Math.abs(frame.pitchDeg) < FACE_CAPTURE_CENTER_THRESHOLD_DEG
-    ) {
-      return { centered: true, yawDeg: frame.yawDeg, pitchDeg: frame.pitchDeg };
+
+    if (isCaptureReady(frame)) {
+      await new Promise((resolve) => setTimeout(resolve, FACE_CAPTURE_SETTLE_MS));
+      const settledFrame = await detectFace(video, performance.now());
+      last = settledFrame;
+      if (isCaptureReady(settledFrame)) {
+        return toFaceCaptureReadiness(true, settledFrame);
+      }
+      // fell out of centered/neutral again during the settle wait - keep polling below.
     }
+
     await new Promise((resolve) => setTimeout(resolve, FACE_CAPTURE_POLL_INTERVAL_MS));
   }
-  return { centered: false, yawDeg: last?.yawDeg ?? 0, pitchDeg: last?.pitchDeg ?? 0 };
+  return toFaceCaptureReadiness(false, last);
 }
 
 /**
@@ -80,9 +134,10 @@ async function waitForFrontalFace(
  * `video` must already have a live camera stream started, OR be an empty <video> element
  * - this function calls startCamera/stopCamera around the liveness check itself, the same
  * way checkLiveness() does. After the liveness sequence finishes (pass or fail), it briefly
- * waits for the user to be facing the camera before grabbing the frame for face matching
- * (see waitForFrontalFace) - the sequence's last challenge can be a head turn, and a
- * profile-view frame doesn't give face-api anything usable to compare.
+ * waits for the user to look centered and neutral (not turned, not smiling, mouth closed)
+ * before grabbing the frame for face matching (see waitForCaptureReadyFace) - the
+ * sequence's last challenge can be a head turn or an expression one, and face-api can't
+ * produce a good descriptor from a profile view or mid-grin.
  *
  * Liveness passing/failing and the face match succeeding/failing are independent signals
  * - this function doesn't decide what "verified" means for your app. Check both fields of
@@ -115,7 +170,7 @@ export async function verifyIdentity(
   const { result } = runLivenessCheck(video, options.liveness);
   const liveness = await result;
 
-  const faceCapture = await waitForFrontalFace(video, options.onFaceCaptureStatus);
+  const faceCapture = await waitForCaptureReadyFace(video, options.onFaceCaptureStatus);
 
   await faceModelsReady;
   // video is still live here - grab the face match before stopping the camera.
