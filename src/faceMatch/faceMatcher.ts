@@ -17,18 +17,20 @@ const DEFAULT_MATCH_THRESHOLD = 0.6;
 let modelsLoadedPromise: Promise<void> | undefined;
 
 /**
- * Loads the three models this needs: a face detector, a landmark model (for alignment
- * before recognition), and the recognition model that produces the 128-d descriptor.
- * Safe to call more than once, and safe to call without awaiting immediately - only
- * loads once, every call (including internal ones from getFaceDescriptor) reuses the
- * same promise. Calling this early (e.g. as soon as your app starts, or at the start of
- * verifyIdentity - see src/index.ts) lets the download/init overlap with whatever else
- * is happening (OCR, the liveness challenge sequence) instead of adding to the end of
- * the flow - see the README's "why is the first match slow" note.
+ * Loads the three models this needs: a face detector (SsdMobilenetv1 - see the doc
+ * comment on getFaceDescriptor for why this one specifically, not the faster
+ * TinyFaceDetector), a landmark model (for alignment before recognition), and the
+ * recognition model that produces the 128-d descriptor. Safe to call more than once, and
+ * safe to call without awaiting immediately - only loads once, every call (including
+ * internal ones from getFaceDescriptor) reuses the same promise. Calling this early (e.g.
+ * as soon as your app starts, or at the start of verifyIdentity - see src/index.ts) lets
+ * the download/init overlap with whatever else is happening (OCR, the liveness challenge
+ * sequence) instead of adding to the end of the flow - see the README's Performance
+ * section.
  */
 export function loadFaceMatchModels(modelBaseUrl: string = DEFAULT_MODEL_BASE_URL): Promise<void> {
   modelsLoadedPromise ??= (async () => {
-    await faceapi.nets.tinyFaceDetector.loadFromUri(modelBaseUrl);
+    await faceapi.nets.ssdMobilenetv1.loadFromUri(modelBaseUrl);
     await faceapi.nets.faceLandmark68Net.loadFromUri(modelBaseUrl);
     await faceapi.nets.faceRecognitionNet.loadFromUri(modelBaseUrl);
   })();
@@ -73,10 +75,18 @@ function captureToCanvas(input: HTMLImageElement | HTMLCanvasElement | HTMLVideo
 }
 
 /**
- * Detects the single largest/most confident face in an image, video frame, or canvas and
- * returns its descriptor. Works the same whether the input is a live <video> frame or a
- * static image (e.g. the whole ID card image) - face-api locates the face itself, no
- * pre-cropped region needed. Returns undefined if no face was found.
+ * Detects the single most confident face in an image, video frame, or canvas and returns
+ * its descriptor. Works the same whether the input is a live <video> frame or a static
+ * image (e.g. the whole ID card image) - face-api locates the face itself, no pre-cropped
+ * region needed. Returns undefined if no face was found.
+ *
+ * Uses SsdMobilenetv1 rather than face-api's faster TinyFaceDetector - confirmed via a
+ * real test that TinyFaceDetector false-positives on ID card graphics (a driver's
+ * license's circular security seal got detected and scored as "a face" over the actual
+ * printed photo). SsdMobilenetv1 is the more accurate of face-api's two detectors, at the
+ * cost of a bigger model download (see README's Performance section). Worth it here since
+ * this only ever runs once per image (not a real-time loop the way liveness's gesture
+ * detection is), so there's no speed reason to prefer the less accurate detector.
  */
 export async function getFaceDescriptor(
   input: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement
@@ -84,7 +94,7 @@ export async function getFaceDescriptor(
   await loadFaceMatchModels();
   const sourceCanvas = captureToCanvas(input);
   const detection = await faceapi
-    .detectSingleFace(sourceCanvas, new faceapi.TinyFaceDetectorOptions())
+    .detectSingleFace(sourceCanvas, new faceapi.SsdMobilenetv1Options())
     .withFaceLandmarks()
     .withFaceDescriptor();
   if (!detection) return undefined;

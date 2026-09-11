@@ -17,16 +17,19 @@ face-match distance/boolean — is meant to reach your server.
 
 ## Status
 
-First real-device run: OCR and the camera/liveness flow both came up fine; the face-match
-step ran but reported no match on the one real ID/face pair tried so far. Not yet
-root-caused — could be the 0.6 threshold being wrong for this kind of photo pair, a bad
-detection on one side, or something else. `compareIdPhotoToLiveCapture`'s `debug` output
-(timings, detection scores, detected face crops - see "Debugging a match result" below)
-was added specifically to investigate this without guessing. Typechecks cleanly
-(`npm run build`) and is built from two already-verified pieces (id-ocr-web tested against
-real ID photos; liveness-check-web tested against a real camera), but the face-match half
-specifically still needs a real tuning pass before trusting its pass/fail. See Known
-Limitations below.
+First real-device run: OCR and the camera/liveness flow both came up fine. The face-match
+step reported no match — root-caused via the debug face-crop preview (see "Debugging a
+match result" below): the original detector (TinyFaceDetector, chosen for speed) mistook
+a driver's license's circular security seal for a face and compared *that* against the
+live capture, never looking at the actual printed photo at all. Switched to
+SsdMobilenetv1 (face-api's more accurate detector - see "How face matching works") since
+this only ever runs once per image, not in a real-time loop, so there was no real reason
+to prefer the faster/sloppier one. **Not yet re-tested against a real ID/face pair** -
+the fix is reasoned from a real, specific failure, not a guess, but still needs a real run
+to confirm it actually picks the printed photo now and that the 0.6 threshold is sane
+once it's comparing the right two things. Typechecks cleanly (`npm run build`) and is
+built from two already-verified pieces (id-ocr-web tested against real ID photos;
+liveness-check-web tested against a real camera). See Known Limitations below.
 
 ## Quick start
 
@@ -100,20 +103,21 @@ OCR models.
 **The trade-off worth knowing:** this adds TensorFlow.js as a third ML runtime in the
 page, alongside onnxruntime-web (OCR) and MediaPipe's own WASM runtime (liveness
 gestures). Three separate WASM-based ML stacks loading on one page is real extra weight
-(roughly another 5-7MB of model files beyond what the other two already load) and more
-surface area for something to go wrong across browsers. If bundle size or load time
-becomes a real problem, the alternative considered was an ONNX face-embedding model
-(e.g. MobileFaceNet) run through onnxruntime-web instead — reusing the same runtime
-id-ocr-web already depends on rather than adding a new one — at the cost of having to
-source, verify, and host that model ourselves the way id-ocr-web's team already learned
-is real, non-trivial work (see that project's Section 7 on models & hosting).
+(roughly 12MB of model files beyond what the other two already load - see the detector
+note below for why this is bigger than it first looks) and more surface area for
+something to go wrong across browsers. If bundle size or load time becomes a real
+problem, the alternative considered was an ONNX face-embedding model (e.g. MobileFaceNet)
+run through onnxruntime-web instead — reusing the same runtime id-ocr-web already depends
+on rather than adding a new one — at the cost of having to source, verify, and host that
+model ourselves the way id-ocr-web's team already learned is real, non-trivial work (see
+that project's Section 7 on models & hosting).
 
 **The flow, concretely:**
-1. `getFaceDescriptor(image)` runs face-api's tiny face detector on whatever it's given
-   (a live `<video>` frame or a static image), then a landmark model (for alignment), then
-   the recognition net, producing a 128-d descriptor. No pre-cropped face region is
-   needed — it finds the face itself, whether that's a live camera frame or the whole ID
-   card image (the photo on the card is just wherever the detector finds a face in it).
+1. `getFaceDescriptor(image)` runs a face detector on whatever it's given (a live
+   `<video>` frame or a static image), then a landmark model (for alignment), then the
+   recognition net, producing a 128-d descriptor. No pre-cropped face region is needed —
+   it finds the face itself, whether that's a live camera frame or the whole ID card image
+   (the photo on the card is just wherever the detector finds a face in it).
 2. `compareIdPhotoToLiveCapture(idImage, liveFrame)` gets a descriptor from each and
    returns the Euclidean distance between them, plus `matched: distance < threshold`.
 3. **Threshold**: defaults to 0.6, which is face-api's own published rule of thumb
@@ -122,6 +126,16 @@ is real, non-trivial work (see that project's Section 7 on models & hosting).
    than the live capture they'd be compared against. Expect this needs its own tuning
    pass against real ID/face pairs, the same way liveness-check-web's gesture thresholds
    needed a real-camera tuning pass before they were trustworthy.
+
+**Detector choice: SsdMobilenetv1, not TinyFaceDetector.** face-api ships two detectors:
+`TinyFaceDetector` (fast, smaller download, less accurate) and `SsdMobilenetv1` (slower,
+~5.4MB, more accurate). This started on TinyFaceDetector, and a real test caught it
+false-positiving on a driver's license's circular security seal — it detected that as "a
+face" with enough confidence that the actual printed photo was never even considered.
+Switched to SsdMobilenetv1, since detection here only ever runs once per image rather
+than in a real-time loop (unlike liveness's per-frame gesture detection, which does need
+to be fast) — there's no real cost to using the more accurate detector for a one-shot
+call, only a bigger one-time download.
 
 ## Debugging a match result
 
@@ -154,7 +168,9 @@ copied straight out of the demo page and shared.
 ## Performance
 
 **Why a run can take 10+ seconds, especially the first one:** face-api's three models
-total roughly 5-7MB, downloaded fresh on a cold browser cache, and TensorFlow.js (which
+(detector, landmarks, recognition) total roughly 12MB with the SsdMobilenetv1 detector
+(see "How face matching works" for why that one over the smaller TinyFaceDetector),
+downloaded fresh on a cold browser cache, and TensorFlow.js (which
 face-api runs on) has its own first-inference warm-up cost in the browser (shader
 compilation on WebGL, JIT warm-up generally) that's a known, normal TF.js characteristic
 - not specific to anything in this code. Both costs are real and mostly unavoidable, but
