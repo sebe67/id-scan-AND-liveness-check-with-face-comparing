@@ -19,8 +19,12 @@ let modelsLoadedPromise: Promise<void> | undefined;
 /**
  * Loads the three models this needs: a face detector, a landmark model (for alignment
  * before recognition), and the recognition model that produces the 128-d descriptor.
- * Call once at app startup, before getFaceDescriptor. Safe to call more than once - only
- * loads once, subsequent calls reuse the same promise.
+ * Safe to call more than once, and safe to call without awaiting immediately - only
+ * loads once, every call (including internal ones from getFaceDescriptor) reuses the
+ * same promise. Calling this early (e.g. as soon as your app starts, or at the start of
+ * verifyIdentity - see src/index.ts) lets the download/init overlap with whatever else
+ * is happening (OCR, the liveness challenge sequence) instead of adding to the end of
+ * the flow - see the README's "why is the first match slow" note.
  */
 export function loadFaceMatchModels(modelBaseUrl: string = DEFAULT_MODEL_BASE_URL): Promise<void> {
   modelsLoadedPromise ??= (async () => {
@@ -31,11 +35,41 @@ export function loadFaceMatchModels(modelBaseUrl: string = DEFAULT_MODEL_BASE_UR
   return modelsLoadedPromise;
 }
 
+export interface FaceBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface FaceDescriptorResult {
   /** 128-d face embedding from face-api's recognition net. Treat as opaque - only meaningful via euclideanDistance against another descriptor from this same model. */
   descriptor: Float32Array;
   /** The face detector's own confidence for the box this descriptor was computed from. */
   detectionScore: number;
+  /** Where on sourceCanvas the detector found the face - in sourceCanvas's own pixel coordinates. */
+  box: FaceBox;
+  /**
+   * A stable snapshot of exactly what was fed to the detector, as a canvas - for an
+   * HTMLCanvasElement input this is that same canvas; for a <video> or <img>, it's a
+   * freshly drawn copy. Kept around so a caller can crop `box` out of it later for
+   * display, even after a live camera stream has since stopped (a <video> element's
+   * current frame isn't retrievable after the stream stops, but a canvas snapshot is).
+   */
+  sourceCanvas: HTMLCanvasElement;
+}
+
+function captureToCanvas(input: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement): HTMLCanvasElement {
+  if (input instanceof HTMLCanvasElement) return input;
+  const width = input instanceof HTMLVideoElement ? input.videoWidth : input.naturalWidth;
+  const height = input instanceof HTMLVideoElement ? input.videoHeight : input.naturalHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("2D canvas context unavailable");
+  ctx.drawImage(input, 0, 0, width, height);
+  return canvas;
 }
 
 /**
@@ -48,32 +82,58 @@ export async function getFaceDescriptor(
   input: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement
 ): Promise<FaceDescriptorResult | undefined> {
   await loadFaceMatchModels();
+  const sourceCanvas = captureToCanvas(input);
   const detection = await faceapi
-    .detectSingleFace(input, new faceapi.TinyFaceDetectorOptions())
+    .detectSingleFace(sourceCanvas, new faceapi.TinyFaceDetectorOptions())
     .withFaceLandmarks()
     .withFaceDescriptor();
   if (!detection) return undefined;
-  return { descriptor: detection.descriptor, detectionScore: detection.detection.score };
+  const { x, y, width, height } = detection.detection.box;
+  return { descriptor: detection.descriptor, detectionScore: detection.detection.score, box: { x, y, width, height }, sourceCanvas };
+}
+
+export interface FaceBoxDebug {
+  detectionScore: number;
+  box: FaceBox;
+  sourceCanvas: HTMLCanvasElement;
+}
+
+export interface FaceMatchDebugInfo {
+  /** How long loadFaceMatchModels() took to resolve - near 0 if it was already pre-warmed (see loadFaceMatchModels' doc comment). */
+  modelLoadMs: number;
+  idPhotoDetectMs: number;
+  liveCaptureDetectMs: number;
+  totalMs: number;
+  threshold: number;
+  /** Undefined if no face was found in the ID photo. */
+  idPhoto?: FaceBoxDebug;
+  /** Undefined if no face was found in the live capture. */
+  liveCapture?: FaceBoxDebug;
 }
 
 export interface FaceMatchResult {
   matched: boolean;
   /** Euclidean distance between the two descriptors - lower means more similar. */
   distance: number;
-  idPhotoDetectionScore: number;
-  liveCaptureDetectionScore: number;
+  debug: FaceMatchDebugInfo;
 }
 
 export type FaceMatchOutcome =
   | FaceMatchResult
-  | { matched: false; reason: "NO_FACE_IN_ID_PHOTO" | "NO_FACE_IN_LIVE_CAPTURE" };
+  | { matched: false; reason: "NO_FACE_IN_ID_PHOTO" | "NO_FACE_IN_LIVE_CAPTURE"; debug: FaceMatchDebugInfo };
 
 /**
  * The main entry point: give it the ID photo (or the whole ID card image - the face
  * detector finds the face itself) and a live camera frame, get back whether they're the
- * same person. Both descriptor extractions and the comparison happen in-browser; nothing
- * about either face - not the images, not the descriptors - needs to leave the device
- * unless the caller explicitly sends the FaceMatchResult itself somewhere.
+ * same person, plus a `debug` block (timings, detection scores/boxes) meant to be
+ * JSON-stringified and shared when something needs diagnosing - see the demo's "Face
+ * Match Result" output. Both descriptor extractions and the comparison happen
+ * in-browser; nothing about either face - not the images, not the descriptors - needs to
+ * leave the device unless the caller explicitly sends the result itself somewhere.
+ *
+ * Runs the two detections sequentially (not in parallel) specifically so debug.
+ * idPhotoDetectMs and debug.liveCaptureDetectMs are each accurate on their own, rather
+ * than overlapping and both looking artificially fast/slow together.
  */
 export async function compareIdPhotoToLiveCapture(
   idPhotoImage: HTMLImageElement | HTMLCanvasElement,
@@ -81,17 +141,33 @@ export async function compareIdPhotoToLiveCapture(
   options: { matchThreshold?: number } = {}
 ): Promise<FaceMatchOutcome> {
   const threshold = options.matchThreshold ?? DEFAULT_MATCH_THRESHOLD;
+  const totalStart = performance.now();
 
-  const [idFace, liveFace] = await Promise.all([getFaceDescriptor(idPhotoImage), getFaceDescriptor(liveFrame)]);
+  const modelLoadStart = performance.now();
+  await loadFaceMatchModels();
+  const modelLoadMs = performance.now() - modelLoadStart;
 
-  if (!idFace) return { matched: false, reason: "NO_FACE_IN_ID_PHOTO" };
-  if (!liveFace) return { matched: false, reason: "NO_FACE_IN_LIVE_CAPTURE" };
+  const idStart = performance.now();
+  const idFace = await getFaceDescriptor(idPhotoImage);
+  const idPhotoDetectMs = performance.now() - idStart;
+
+  const liveStart = performance.now();
+  const liveFace = await getFaceDescriptor(liveFrame);
+  const liveCaptureDetectMs = performance.now() - liveStart;
+
+  const debug: FaceMatchDebugInfo = {
+    modelLoadMs,
+    idPhotoDetectMs,
+    liveCaptureDetectMs,
+    totalMs: performance.now() - totalStart,
+    threshold,
+    idPhoto: idFace ? { detectionScore: idFace.detectionScore, box: idFace.box, sourceCanvas: idFace.sourceCanvas } : undefined,
+    liveCapture: liveFace ? { detectionScore: liveFace.detectionScore, box: liveFace.box, sourceCanvas: liveFace.sourceCanvas } : undefined,
+  };
+
+  if (!idFace) return { matched: false, reason: "NO_FACE_IN_ID_PHOTO", debug };
+  if (!liveFace) return { matched: false, reason: "NO_FACE_IN_LIVE_CAPTURE", debug };
 
   const distance = faceapi.euclideanDistance(idFace.descriptor, liveFace.descriptor);
-  return {
-    matched: distance < threshold,
-    distance,
-    idPhotoDetectionScore: idFace.detectionScore,
-    liveCaptureDetectionScore: liveFace.detectionScore,
-  };
+  return { matched: distance < threshold, distance, debug };
 }

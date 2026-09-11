@@ -1,5 +1,5 @@
 import { configureOrtWasmPaths, verifyIdentity, OCR_LIBRARY_VERSION } from "../src/index";
-import type { RunnerEvent } from "../src/index";
+import type { RunnerEvent, FaceBoxDebug } from "../src/index";
 
 document.querySelector<HTMLElement>("#version")!.textContent = `v${OCR_LIBRARY_VERSION}`;
 
@@ -17,7 +17,12 @@ const instructionEl = document.querySelector<HTMLDivElement>("#instruction")!;
 const progressEl = document.querySelector<HTMLDivElement>("#progress")!;
 const startButton = document.querySelector<HTMLButtonElement>("#start")!;
 const flipToggle = document.querySelector<HTMLInputElement>("#flipToggle")!;
-const output = document.querySelector<HTMLPreElement>("#output")!;
+const idFaceCropEl = document.querySelector<HTMLCanvasElement>("#idFaceCrop")!;
+const liveFaceCropEl = document.querySelector<HTMLCanvasElement>("#liveFaceCrop")!;
+const timingEl = document.querySelector<HTMLDivElement>("#timing")!;
+const ocrOutput = document.querySelector<HTMLPreElement>("#ocrOutput")!;
+const livenessOutput = document.querySelector<HTMLPreElement>("#livenessOutput")!;
+const faceMatchOutput = document.querySelector<HTMLPreElement>("#faceMatchOutput")!;
 
 const CHALLENGE_COUNT = 3;
 let completedCount = 0;
@@ -54,16 +59,42 @@ function handleEvent(event: RunnerEvent): void {
   }
 }
 
+/** Crops `box` out of a FaceBoxDebug's sourceCanvas and draws it into a small preview canvas. */
+function renderFaceCrop(target: HTMLCanvasElement, faceDebug: FaceBoxDebug | undefined): void {
+  if (!faceDebug) {
+    target.width = 0;
+    target.height = 0;
+    return;
+  }
+  const { box, sourceCanvas } = faceDebug;
+  target.width = box.width;
+  target.height = box.height;
+  const ctx = target.getContext("2d")!;
+  ctx.drawImage(sourceCanvas, box.x, box.y, box.width, box.height, 0, 0, box.width, box.height);
+}
+
+// sourceCanvas isn't meaningfully JSON-serializable (it's a DOM element, stringifies to
+// noise) - it's shown as an actual image via renderFaceCrop above instead, so it's
+// stripped out of the pasteable debug text here.
+function stripCanvases(key: string, value: unknown): unknown {
+  return key === "sourceCanvas" ? undefined : value;
+}
+
 startButton.addEventListener("click", async () => {
   const frontFile = frontInput.files?.[0];
   const backFile = backInput.files?.[0];
   if (!frontFile) {
-    output.textContent = "Pick an ID front image first.";
+    ocrOutput.textContent = "Pick an ID front image first.";
     return;
   }
 
   startButton.disabled = true;
-  output.textContent = "";
+  ocrOutput.textContent = "";
+  livenessOutput.textContent = "";
+  faceMatchOutput.textContent = "";
+  timingEl.textContent = "";
+  renderFaceCrop(idFaceCropEl, undefined);
+  renderFaceCrop(liveFaceCropEl, undefined);
   completedCount = 0;
   renderProgress(CHALLENGE_COUNT, 0);
   instructionEl.textContent = "Running OCR on the ID...";
@@ -77,11 +108,24 @@ startButton.addEventListener("click", async () => {
       },
       backFile
     );
+
     instructionEl.textContent = result.faceMatch.matched ? "Done — face matched." : "Done — face did not match.";
-    output.textContent = JSON.stringify(result, null, 2);
+
+    ocrOutput.textContent = JSON.stringify(result.idOcr, null, 2);
+    livenessOutput.textContent = JSON.stringify(result.liveness, null, 2);
+    faceMatchOutput.textContent = JSON.stringify(result.faceMatch, stripCanvases, 2);
+
+    const { debug } = result.faceMatch;
+    timingEl.textContent =
+      `model load: ${debug.modelLoadMs.toFixed(0)}ms | ` +
+      `ID photo detect: ${debug.idPhotoDetectMs.toFixed(0)}ms | ` +
+      `live capture detect: ${debug.liveCaptureDetectMs.toFixed(0)}ms | ` +
+      `total: ${debug.totalMs.toFixed(0)}ms`;
+    renderFaceCrop(idFaceCropEl, debug.idPhoto);
+    renderFaceCrop(liveFaceCropEl, debug.liveCapture);
   } catch (err) {
     instructionEl.textContent = "Error.";
-    output.textContent = `Error: ${(err as Error).message}`;
+    ocrOutput.textContent = `Error: ${(err as Error).message}`;
     console.error(err);
   } finally {
     startButton.disabled = false;

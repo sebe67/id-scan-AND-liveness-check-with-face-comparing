@@ -4,7 +4,7 @@ import type { PhIdOcrResult } from "./ocr/types";
 import { startCamera, stopCamera, runLivenessCheck } from "./liveness/index";
 import type { RunLivenessCheckOptions } from "./liveness/index";
 import type { LivenessResult } from "./liveness/challenges/challengeRunner";
-import { compareIdPhotoToLiveCapture, type FaceMatchOutcome } from "./faceMatch/faceMatcher";
+import { compareIdPhotoToLiveCapture, loadFaceMatchModels, type FaceMatchOutcome } from "./faceMatch/faceMatcher";
 
 export interface VerifyIdentityOptions {
   /** Forwarded to runIdOcr for both the front and (if given) back image. */
@@ -46,6 +46,14 @@ export async function verifyIdentity(
   options: VerifyIdentityOptions = {},
   idBackImage?: ImageInput
 ): Promise<VerifyIdentityResult> {
+  // Kick off face-api's model download/init now, in parallel with the OCR and liveness
+  // steps below, instead of only starting it once we actually need it (which would add
+  // model load time - a few seconds on a cold cache - onto the very end of the flow,
+  // right when the user is waiting for a final result). By the time we get to
+  // compareIdPhotoToLiveCapture, this is usually already done; debug.modelLoadMs in the
+  // result shows how much it actually helped on a given run.
+  const faceModelsReady = loadFaceMatchModels();
+
   const frontCanvas = await toCanvas(idFrontImage);
   const ocrResults = [await runIdOcr(frontCanvas, "FRONT", options.ocr)];
   if (idBackImage) {
@@ -58,6 +66,7 @@ export async function verifyIdentity(
   const { result } = runLivenessCheck(video, options.liveness);
   const liveness = await result;
 
+  await faceModelsReady;
   // video is still live here - grab the face match before stopping the camera.
   const faceMatch = await compareIdPhotoToLiveCapture(frontCanvas, video, options.faceMatch);
 
@@ -76,4 +85,4 @@ export type { CheckLivenessOptions, RunLivenessCheckOptions, LivenessCheckHandle
 export type { ChallengeResult, LivenessResult, RunnerEvent } from "./liveness/challenges/challengeRunner";
 
 export { loadFaceMatchModels, getFaceDescriptor, compareIdPhotoToLiveCapture } from "./faceMatch/faceMatcher";
-export type { FaceDescriptorResult, FaceMatchResult, FaceMatchOutcome } from "./faceMatch/faceMatcher";
+export type { FaceBox, FaceBoxDebug, FaceDescriptorResult, FaceMatchDebugInfo, FaceMatchResult, FaceMatchOutcome } from "./faceMatch/faceMatcher";

@@ -53,19 +53,45 @@
         padding: 0.5rem 1.25rem;
         cursor: pointer;
       }
-      #output {
+      pre {
         font-family: ui-monospace, monospace;
         font-size: 0.85rem;
         white-space: pre-wrap;
         background: #f4f4f4;
         padding: 0.75rem;
-        margin-top: 1rem;
+        margin-top: 0.5rem;
         border-radius: 4px;
       }
       label {
         display: block;
         margin-top: 0.75rem;
         font-size: 0.9rem;
+      }
+      h3 {
+        margin-bottom: 0;
+      }
+      #faceCrops {
+        display: flex;
+        gap: 1rem;
+        margin-top: 0.5rem;
+      }
+      .faceCrop {
+        text-align: center;
+        font-size: 0.8rem;
+        color: #555;
+      }
+      .faceCrop canvas {
+        display: block;
+        max-width: 160px;
+        max-height: 160px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        background: #eee;
+      }
+      #timing {
+        font-size: 0.85rem;
+        color: #333;
+        margin-top: 0.5rem;
       }
     </style>
   </head>
@@ -86,7 +112,23 @@
     <div id="progress"></div>
     <button id="start">Start</button>
     <label><input type="checkbox" id="flipToggle" /> Flip head-turn direction (turn on if left/right feel backwards on this device/camera)</label>
-    <pre id="output">(waiting)</pre>
+
+    <h3>Detected faces</h3>
+    <div id="faceCrops">
+      <div class="faceCrop">ID photo<br /><canvas id="idFaceCrop"></canvas></div>
+      <div class="faceCrop">Live capture<br /><canvas id="liveFaceCrop"></canvas></div>
+    </div>
+    <div id="timing"></div>
+
+    <h3>ID OCR Result</h3>
+    <pre id="ocrOutput">(waiting)</pre>
+
+    <h3>Liveness Result</h3>
+    <pre id="livenessOutput">(waiting)</pre>
+
+    <h3>Face Match Result (debug - safe to copy/paste for troubleshooting)</h3>
+    <pre id="faceMatchOutput">(waiting)</pre>
+
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

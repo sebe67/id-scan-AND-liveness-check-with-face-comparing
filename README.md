@@ -17,12 +17,16 @@ face-match distance/boolean — is meant to reach your server.
 
 ## Status
 
-**Not yet tested against a real camera or real ID/face pairs.** Built by combining two
-already-verified pieces (id-ocr-web, tested against real ID photos; liveness-check-web,
-tested against a real camera) with a new face-comparison step that hasn't been run for
-real yet. Typechecks cleanly (`npm run build`), but the actual match accuracy, the
-0.6 distance threshold, and the getUserMedia/camera flow all need real-device testing
-before trusting this for anything beyond a demo. See Known Limitations below.
+First real-device run: OCR and the camera/liveness flow both came up fine; the face-match
+step ran but reported no match on the one real ID/face pair tried so far. Not yet
+root-caused — could be the 0.6 threshold being wrong for this kind of photo pair, a bad
+detection on one side, or something else. `compareIdPhotoToLiveCapture`'s `debug` output
+(timings, detection scores, detected face crops - see "Debugging a match result" below)
+was added specifically to investigate this without guessing. Typechecks cleanly
+(`npm run build`) and is built from two already-verified pieces (id-ocr-web tested against
+real ID photos; liveness-check-web tested against a real camera), but the face-match half
+specifically still needs a real tuning pass before trusting its pass/fail. See Known
+Limitations below.
 
 ## Quick start
 
@@ -40,7 +44,7 @@ const result = await verifyIdentity(frontIdImage, video, {
 
 console.log(result.idOcr);      // OCR fields, same shape as id-ocr-web's PhIdOcrResult
 console.log(result.liveness);   // { passed, challenges: [...] }
-console.log(result.faceMatch);  // { matched, distance, idPhotoDetectionScore, liveCaptureDetectionScore } | { matched: false, reason: "NO_FACE_IN_..." }
+console.log(result.faceMatch);  // { matched, distance, debug } | { matched: false, reason: "NO_FACE_IN_...", debug }
 ```
 
 `verifyIdentity` starts the camera, runs the liveness challenges, grabs a face
@@ -119,6 +123,69 @@ is real, non-trivial work (see that project's Section 7 on models & hosting).
    pass against real ID/face pairs, the same way liveness-check-web's gesture thresholds
    needed a real-camera tuning pass before they were trustworthy.
 
+## Debugging a match result
+
+Every `FaceMatchOutcome` (matched or not, even a `NO_FACE_IN_...` failure) carries a
+`debug` object meant to be pasted somewhere for troubleshooting:
+
+```ts
+{
+  modelLoadMs, idPhotoDetectMs, liveCaptureDetectMs, totalMs, // timings, see Performance below
+  threshold,                          // the distance cutoff actually used
+  idPhoto:      { detectionScore, box } | undefined,  // undefined = no face found in the ID photo
+  liveCapture:  { detectionScore, box } | undefined,  // undefined = no face found in the live frame
+}
+```
+
+(`box` and a `sourceCanvas` are also on each side internally - the demo uses
+`sourceCanvas` to draw the "Detected faces" crop preview, but strips it before printing
+the JSON since a canvas doesn't stringify to anything useful as text.)
+
+`detectionScore` (0-1, the face detector's own confidence) is the first thing to check on
+a surprise no-match: a low score on either side means the detector barely found a face at
+all, which makes the resulting descriptor unreliable regardless of the distance number.
+The demo (`npm run example`) shows this automatically - after a run, "Detected faces"
+displays exactly what the detector cropped out of both the ID photo and the live capture,
+which is usually the fastest way to see whether it grabbed the actual face, a logo, part
+of the background, or nothing sensible. If a real mismatch needs troubleshooting, the
+`faceMatchOutput` block's JSON (which includes the full `debug` object) is meant to be
+copied straight out of the demo page and shared.
+
+## Performance
+
+**Why a run can take 10+ seconds, especially the first one:** face-api's three models
+total roughly 5-7MB, downloaded fresh on a cold browser cache, and TensorFlow.js (which
+face-api runs on) has its own first-inference warm-up cost in the browser (shader
+compilation on WebGL, JIT warm-up generally) that's a known, normal TF.js characteristic
+- not specific to anything in this code. Both costs are real and mostly unavoidable, but
+they only need to happen once per page load.
+
+**What's already done about it:** `verifyIdentity()` now calls `loadFaceMatchModels()`
+immediately, before OCR or the liveness sequence even start, instead of only starting the
+download once it's actually needed at the very end. Downloading/initializing overlaps
+with OCR and the (several-second) liveness challenge sequence instead of adding to the
+end of the flow on top of them. `debug.modelLoadMs` in the result shows directly how much
+this helped on a given run - it should read near 0ms if the models had already finished
+loading by the time the face-match step needed them.
+
+**What wasn't changed, and why:** the natural next lever would be forcing TensorFlow.js
+onto its fastest backend (WebGL) explicitly rather than trusting its own auto-selection.
+Checked against the actual installed `@vladmandic/face-api` package before writing
+anything here - its public API doesn't expose a `tf` handle or backend control function
+(a `tf.setBackend(...)` snippet does appear in its type file, but only inside a leftover
+documentation comment copied from TensorFlow.js's own source, not as something this
+package actually exports). Writing code against that would have been guessing at
+something already checked and found not to exist, so it was left alone. In a real
+browser, TF.js's own automatic backend selection typically already picks WebGL when it's
+available, so this may not even cost anything in practice - `debug.idPhotoDetectMs` /
+`debug.liveCaptureDetectMs` (the actual inference time, separate from model loading) is
+the number that would show it if the backend chosen were ever the slow CPU one.
+
+**If it's still slow after this**, paste back a `debug` block from a real run (the
+"Face Match Result" section in the demo) - the four timing numbers split out exactly
+where the time is going (download+init vs. each detection), which is more useful than
+guessing further from here.
+
 ## Models & hosting
 
 | What | Loaded from | Notes |
@@ -130,9 +197,9 @@ is real, non-trivial work (see that project's Section 7 on models & hosting).
 
 ## Known limitations / open questions
 
-- **Not tested against a real camera or real ID/face pairs yet.** Everything here
-  typechecks and is built from two already-working pieces, but the combined flow (and
-  especially the face-match threshold) needs real testing before trusting it.
+- **Face-match accuracy is unverified — the one real run so far reported no match, cause
+  unknown.** See Status above and "Debugging a match result" for how to investigate a
+  given run instead of guessing.
 - **The face-match threshold (0.6) is a generic default, not tuned for this use case.**
   See "How face matching works" above.
 - **No anti-spoofing**, inherited from liveness-check-web - a photo or video replay could
