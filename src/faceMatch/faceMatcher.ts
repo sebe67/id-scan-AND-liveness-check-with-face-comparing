@@ -7,12 +7,15 @@ import * as faceapi from "@vladmandic/face-api";
 // one without the other.
 const DEFAULT_MODEL_BASE_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model";
 
-// 0.6 Euclidean distance is face-api's own published rule of thumb for "same person",
-// tuned against the LFW benchmark - a starting point, not validated yet against real ID
-// photos (which are often lower-res, older, and more compressed than a live camera
-// frame). Expect this to need tuning once tested against real ID/face pairs, the same
-// way liveness/challenges/*.ts's gesture thresholds needed a real-camera tuning pass.
-const DEFAULT_MATCH_THRESHOLD = 0.6;
+// Tuned from a real (small) sample rather than left at face-api's generic LFW-tuned
+// default of 0.6: 5 genuine-match runs (one real person's ID vs. their own live capture,
+// after the pose/expression fixes below) came in at 0.41-0.49, and 5 impostor runs
+// (a different, unrelated person against that same ID) came in at 0.55-0.57 - a clean
+// gap with no overlap. 0.52 sits in the middle of that gap for roughly even margin on
+// both sides, rather than hugging the genuine-match edge. Still only one impostor
+// identity and one lighting/camera setup so far - worth revisiting if a false
+// accept/reject turns up against a different person or setup.
+const DEFAULT_MATCH_THRESHOLD = 0.52;
 
 let modelsLoadedPromise: Promise<void> | undefined;
 

@@ -36,12 +36,18 @@ guessing:
    expression-invariant. `verifyIdentity` now waits briefly for the user to look both
    centered AND neutral (not smiling, mouth closed) before capturing - see "Why wait for
    a centered, neutral face" below.
+4. With those three fixes in place, a small real test (5 genuine runs, one person's ID
+   against their own live capture; 5 impostor runs, a different unrelated person against
+   that same ID) came back with a clean gap: genuine distances 0.41-0.49, impostor
+   distances 0.55-0.57, no overlap. Threshold moved from face-api's generic 0.6 default
+   to 0.52 - centered in that gap. See "How face matching works" below.
 
-**Not yet re-tested against a real ID/face pair with all fixes in place** - each fix is
-reasoned from a real, specific failure, not a guess, but none have been confirmed
-together against an actual run yet. Typechecks cleanly (`npm run build`) and is built
-from two already-verified pieces (id-ocr-web tested against real ID photos;
-liveness-check-web tested against a real camera). See Known Limitations below.
+**Still only one real ID and two real people tested (one genuine, one impostor), one
+camera/lighting setup.** The gap in point 4 is real evidence, not a guess, but it's a
+small sample - worth more trials (different people, different conditions) before
+trusting 0.52 broadly. Typechecks cleanly (`npm run build`) and is built from two
+already-verified pieces (id-ocr-web tested against real ID photos; liveness-check-web
+tested against a real camera). See Known Limitations below.
 
 ## Quick start
 
@@ -134,12 +140,13 @@ that project's Section 7 on models & hosting).
    (the photo on the card is just wherever the detector finds a face in it).
 2. `compareIdPhotoToLiveCapture(idImage, liveFrame)` gets a descriptor from each and
    returns the Euclidean distance between them, plus `matched: distance < threshold`.
-3. **Threshold**: defaults to 0.6, which is face-api's own published rule of thumb
-   (tuned against the LFW benchmark) — not yet validated against real Philippine ID
-   photos, which tend to be lower-resolution, more compressed, and sometimes years older
-   than the live capture they'd be compared against. Expect this needs its own tuning
-   pass against real ID/face pairs, the same way liveness-check-web's gesture thresholds
-   needed a real-camera tuning pass before they were trustworthy.
+3. **Threshold**: defaults to 0.52, moved down from face-api's generic 0.6 (LFW-tuned)
+   default after a real test - see Status above. 5 genuine-match distances came in at
+   0.41-0.49, 5 impostor distances at 0.55-0.57; 0.52 sits centered in that gap rather
+   than hugging either edge. Still based on one ID, one genuine person, one impostor, and
+   one camera/lighting setup - the same way liveness-check-web's gesture thresholds
+   needed real-camera testing before they were trustworthy, this needs more real trials
+   (different people, different conditions) before 0.52 should be trusted broadly.
 
 **Detector choice: SsdMobilenetv1, not TinyFaceDetector.** face-api ships two detectors:
 `TinyFaceDetector` (fast, smaller download, less accurate) and `SsdMobilenetv1` (slower,
@@ -263,14 +270,16 @@ guessing further from here.
 
 ## Known limitations / open questions
 
-- **Face-match accuracy still needs a clean real-world confirmation.** Two real bugs have
-  already been found and fixed via actual testing (wrong detector picking up the ID
-  card's logo instead of the photo; the live frame sometimes caught mid-head-turn or
-  mid-smile), but no run has yet gone through with all fixes in place. See Status above
-  and "Debugging a match result" for how to investigate a given run instead of guessing.
-- **The face-match threshold (0.6) and the capture-readiness wait's angle/expression/
-  timing numbers are all generic starting points, not tuned for this use case.** See "How
-  face matching works" and "Why wait for a centered, neutral face" above.
+- **The 0.52 threshold is real but thin evidence: one ID, one genuine person, one
+  impostor, one camera/lighting setup.** The genuine/impostor distance gap was clean
+  (0.41-0.49 vs. 0.55-0.57) but small-sample - a different impostor or a worse
+  lighting/camera combination could plausibly land inside that gap and get misclassified
+  either way. Re-check this if a false accept/reject ever turns up in real use - see
+  Status above and "Debugging a match result" for how to investigate a given run instead
+  of guessing.
+- **The capture-readiness wait's angle/expression/timing numbers (15°, 0.3/0.2, 400ms,
+  4s) are still generic starting points, not tuned for this use case.** See "Why wait for
+  a centered, neutral face" above.
 - **No anti-spoofing**, inherited from liveness-check-web - a photo or video replay could
   pass the liveness step, and a good enough photo could also pass the face-match step
   against the same ID. Fine for a low-risk use case, not a real fraud control as-is.
