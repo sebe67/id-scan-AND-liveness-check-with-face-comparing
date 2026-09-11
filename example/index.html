@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>id-scan-and-liveness-check-with-face-comparing example</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+      }
+      #videoWrap {
+        position: relative;
+        width: 640px;
+        max-width: 100%;
+        aspect-ratio: 4 / 3;
+        background: #000;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        transform: scaleX(-1); /* mirror for a natural selfie view */
+      }
+      #instruction {
+        font-size: 1.5rem;
+        font-weight: bold;
+        margin: 1rem 0 0.5rem;
+        min-height: 2.5rem;
+      }
+      #progress {
+        margin-bottom: 1rem;
+      }
+      #progress span {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.75rem;
+        height: 1.75rem;
+        border-radius: 50%;
+        background: #ddd;
+        margin-right: 0.5rem;
+        font-size: 0.9rem;
+      }
+      #progress span.done {
+        background: #34a853;
+        color: white;
+      }
+      button {
+        font-size: 1rem;
+        padding: 0.5rem 1.25rem;
+        cursor: pointer;
+      }
+      #output {
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+        white-space: pre-wrap;
+        background: #f4f4f4;
+        padding: 0.75rem;
+        margin-top: 1rem;
+        border-radius: 4px;
+      }
+      label {
+        display: block;
+        margin-top: 0.75rem;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>id-scan-and-liveness-check-with-face-comparing demo <small id="version" style="font-weight: normal; color: #666"></small></h1>
+    <p>
+      Combines id-ocr-web and liveness-check-web with a face-comparison step in between:
+      pick an already cropped/edge-straightened ID image, then run the liveness challenge
+      sequence against your camera. When it finishes, a face descriptor is pulled from the
+      ID photo and from your live camera frame and compared - all in the browser. See
+      <a href="../README.md">../README.md</a> for how to wire <code>verifyIdentity</code>
+      into a real app.
+    </p>
+    <p><label>ID front image: <input id="front" type="file" accept="image/*" /></label></p>
+    <p><label>ID back image (optional): <input id="back" type="file" accept="image/*" /></label></p>
+    <div id="videoWrap"><video id="video" autoplay muted playsinline></video></div>
+    <div id="instruction">Pick a front image, then click "Start"</div>
+    <div id="progress"></div>
+    <button id="start">Start</button>
+    <label><input type="checkbox" id="flipToggle" /> Flip head-turn direction (turn on if left/right feel backwards on this device/camera)</label>
+    <pre id="output">(waiting)</pre>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

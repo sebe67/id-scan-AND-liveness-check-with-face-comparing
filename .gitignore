@@ -1,0 +1,12 @@
+node_modules/
+dist/
+example/dist/
+
+# Real ID photos and face captures used for local testing - never commit these. This
+# project pairs an ID photo with a live face capture, which is more sensitive than either
+# alone (it links a face to an identity document) - be extra careful not to add test
+# images here by accident.
+specimens/**/*.jpg
+specimens/**/*.jpeg
+specimens/**/*.png
+specimens/**/*.webp

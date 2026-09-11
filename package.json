@@ -1,0 +1,22 @@
+{
+  "name": "id-scan-and-liveness-check-with-face-comparing",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Client-side (browser) ID scan + active liveness check + face comparison between the two, all on-device. Combines id-ocr-web and liveness-check-web plus a new face-match step, so a face vector never has to leave the browser or be stored server-side between steps.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "example": "vite"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.29.0",
+    "@mediapipe/tasks-vision": "^0.10.14",
+    "@vladmandic/face-api": "^1.7.15"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  }
+}
