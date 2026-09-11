@@ -105,6 +105,9 @@ startButton.addEventListener("click", async () => {
       video,
       {
         liveness: { challengeCount: CHALLENGE_COUNT, onEvent: handleEvent, flipHeadTurnDirection: flipToggle.checked },
+        onFaceCaptureStatus: (message) => {
+          instructionEl.textContent = message;
+        },
       },
       backFile
     );
@@ -116,11 +119,14 @@ startButton.addEventListener("click", async () => {
     faceMatchOutput.textContent = JSON.stringify(result.faceMatch, stripCanvases, 2);
 
     const { debug } = result.faceMatch;
+    const { faceCapture } = result;
     timingEl.textContent =
       `model load: ${debug.modelLoadMs.toFixed(0)}ms | ` +
       `ID photo detect: ${debug.idPhotoDetectMs.toFixed(0)}ms | ` +
       `live capture detect: ${debug.liveCaptureDetectMs.toFixed(0)}ms | ` +
-      `total: ${debug.totalMs.toFixed(0)}ms`;
+      `total: ${debug.totalMs.toFixed(0)}ms\n` +
+      `live capture angle: ${faceCapture.centered ? "centered" : "NOT centered (timed out waiting)"} ` +
+      `(yaw ${faceCapture.yawDeg.toFixed(0)}°, pitch ${faceCapture.pitchDeg.toFixed(0)}°)`;
     renderFaceCrop(idFaceCropEl, debug.idPhoto);
     renderFaceCrop(liveFaceCropEl, debug.liveCapture);
   } catch (err) {

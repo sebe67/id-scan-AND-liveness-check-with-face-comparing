@@ -17,18 +17,27 @@ face-match distance/boolean — is meant to reach your server.
 
 ## Status
 
-First real-device run: OCR and the camera/liveness flow both came up fine. The face-match
-step reported no match — root-caused via the debug face-crop preview (see "Debugging a
-match result" below): the original detector (TinyFaceDetector, chosen for speed) mistook
-a driver's license's circular security seal for a face and compared *that* against the
-live capture, never looking at the actual printed photo at all. Switched to
-SsdMobilenetv1 (face-api's more accurate detector - see "How face matching works") since
-this only ever runs once per image, not in a real-time loop, so there was no real reason
-to prefer the faster/sloppier one. **Not yet re-tested against a real ID/face pair** -
-the fix is reasoned from a real, specific failure, not a guess, but still needs a real run
-to confirm it actually picks the printed photo now and that the 0.6 threshold is sane
-once it's comparing the right two things. Typechecks cleanly (`npm run build`) and is
-built from two already-verified pieces (id-ocr-web tested against real ID photos;
+First real-device run: OCR and the camera/liveness flow both came up fine. Two real,
+specific bugs have been found and fixed since, each via actual testing rather than
+guessing:
+
+1. The face-match step reported no match — root-caused via the debug face-crop preview
+   (see "Debugging a match result" below): the original detector (TinyFaceDetector,
+   chosen for speed) mistook a driver's license's circular security seal for a face and
+   compared *that* against the live capture, never looking at the actual printed photo
+   at all. Switched to SsdMobilenetv1 (face-api's more accurate detector - see "How face
+   matching works") since this only ever runs once per image, not in a real-time loop,
+   so there was no real reason to prefer the faster/sloppier one.
+2. Separately noticed: since the liveness challenge sequence is randomized and can end on
+   a head turn, the live frame grabbed right after it finishes could catch the user
+   mid-turn - a profile view face-api can't get a good descriptor from. `verifyIdentity`
+   now waits briefly for a frontal face before capturing - see "Why wait for a frontal
+   face" below.
+
+**Not yet re-tested against a real ID/face pair with both fixes in place** - each fix is
+reasoned from a real, specific failure, not a guess, but neither has been confirmed
+against an actual run yet. Typechecks cleanly (`npm run build`) and is built from two
+already-verified pieces (id-ocr-web tested against real ID photos;
 liveness-check-web tested against a real camera). See Known Limitations below.
 
 ## Quick start
@@ -45,16 +54,18 @@ const result = await verifyIdentity(frontIdImage, video, {
   liveness: { flipHeadTurnDirection: false }, // see liveness-check-web's handoff doc - Section 6
 });
 
-console.log(result.idOcr);      // OCR fields, same shape as id-ocr-web's PhIdOcrResult
-console.log(result.liveness);   // { passed, challenges: [...] }
-console.log(result.faceMatch);  // { matched, distance, debug } | { matched: false, reason: "NO_FACE_IN_...", debug }
+console.log(result.idOcr);       // OCR fields, same shape as id-ocr-web's PhIdOcrResult
+console.log(result.liveness);    // { passed, challenges: [...] }
+console.log(result.faceCapture); // { centered, yawDeg, pitchDeg } - was the live frame actually facing forward?
+console.log(result.faceMatch);   // { matched, distance, debug } | { matched: false, reason: "NO_FACE_IN_...", debug }
 ```
 
-`verifyIdentity` starts the camera, runs the liveness challenges, grabs a face
-descriptor from the live feed right after the sequence ends (pass or fail), compares it
-against a descriptor from the ID image, then stops the camera. One call, one combined
-result. Pass a back-image as the 4th argument if you have one — it's OCR'd too and
-merged into `idOcr` the same way id-ocr-web's `mergeIdOcrResults` already worked.
+`verifyIdentity` starts the camera, runs the liveness challenges, briefly waits for the
+user to be facing the camera again (see "Why wait for a frontal face" below), compares a
+descriptor from that frame against one from the ID image, then stops the camera. One
+call, one combined result. Pass a back-image as the 4th argument if you have one — it's
+OCR'd too and merged into `idOcr` the same way id-ocr-web's `mergeIdOcrResults` already
+worked.
 
 `liveness.passed` and `faceMatch.matched` are independent — this library doesn't decide
 what counts as "verified" for your app. Combine them however your actual policy needs
@@ -137,6 +148,30 @@ than in a real-time loop (unlike liveness's per-frame gesture detection, which d
 to be fast) — there's no real cost to using the more accurate detector for a one-shot
 call, only a bigger one-time download.
 
+## Why wait for a frontal face
+
+The liveness challenge sequence is randomized (`src/liveness/challenges/sequence.ts`) and
+can include TURN_LEFT/TURN_RIGHT. If it happens to end on one of those, grabbing the live
+frame the instant the sequence finishes can catch the user mid-turn — a profile view
+doesn't give face-api's recognition net anything close to what it needs, which was
+confirmed via real testing to produce a confident-looking but wrong "didn't match".
+
+`verifyIdentity` now waits (up to 4 seconds, polling every ~80ms) for the user's yaw and
+pitch to both be within 15° of center before grabbing the frame - reusing
+`liveness/faceTracking.ts`'s own MediaPipe-based angle detection (the same thing
+`headTurn.ts` already computes for the turn challenges), not a new model or extra
+download. `onFaceCaptureStatus` fires once, right when this wait starts, so the UI can
+show something like "Look straight at the camera..." (the demo wires this to the same
+instruction text the challenges themselves use).
+
+This always resolves - if the user never centers within the timeout, it proceeds anyway
+with whatever the last frame was, rather than blocking the flow indefinitely.
+`result.faceCapture.centered` says whether it actually succeeded, and
+`.yawDeg`/`.pitchDeg` show the angle of the frame that was actually used, so a future
+mismatch can be checked against this first before assuming the match itself is wrong.
+Not yet tuned against real users - the 15°/4s numbers are reasoned defaults (generous
+enough for a normal "turn back to center"), not validated ones.
+
 ## Debugging a match result
 
 Every `FaceMatchOutcome` (matched or not, even a `NO_FACE_IN_...` failure) carries a
@@ -213,18 +248,17 @@ guessing further from here.
 
 ## Known limitations / open questions
 
-- **Face-match accuracy is unverified — the one real run so far reported no match, cause
-  unknown.** See Status above and "Debugging a match result" for how to investigate a
-  given run instead of guessing.
-- **The face-match threshold (0.6) is a generic default, not tuned for this use case.**
-  See "How face matching works" above.
+- **Face-match accuracy still needs a clean real-world confirmation.** Two real bugs have
+  already been found and fixed via actual testing (wrong detector picking up the ID
+  card's logo instead of the photo; the live frame sometimes caught mid-head-turn), but
+  no run has yet gone through with both fixes in place. See Status above and "Debugging a
+  match result" for how to investigate a given run instead of guessing.
+- **The face-match threshold (0.6) and the frontal-face wait's angle/timeout (15°/4s)
+  are both generic starting points, not tuned for this use case.** See "How face matching
+  works" and "Why wait for a frontal face" above.
 - **No anti-spoofing**, inherited from liveness-check-web - a photo or video replay could
   pass the liveness step, and a good enough photo could also pass the face-match step
   against the same ID. Fine for a low-risk use case, not a real fraud control as-is.
-- **The live face capture happens once, right after the liveness sequence ends** - not
-  during a specific "neutral face" moment. If match accuracy turns out too low in
-  testing, capturing during a more controlled moment (e.g. a brief "hold still" beat
-  added to the challenge sequence) is a reasonable next step.
 - **Bundle size**: three ML runtimes on one page (Section "How face matching works").
   Worth measuring real load time on a target device before shipping.
 - **head-turn direction issue from liveness-check-web still applies unchanged** - read

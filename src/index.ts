@@ -1,8 +1,8 @@
 import { toCanvas, type ImageInput } from "./ocr/imageUtils";
 import { runIdOcr, mergeIdOcrResults, type RunIdOcrOptions } from "./ocr/index";
 import type { PhIdOcrResult } from "./ocr/types";
-import { startCamera, stopCamera, runLivenessCheck } from "./liveness/index";
-import type { RunLivenessCheckOptions } from "./liveness/index";
+import { startCamera, stopCamera, runLivenessCheck, detectFace } from "./liveness/index";
+import type { RunLivenessCheckOptions, FaceFrame } from "./liveness/index";
 import type { LivenessResult } from "./liveness/challenges/challengeRunner";
 import { compareIdPhotoToLiveCapture, loadFaceMatchModels, type FaceMatchOutcome } from "./faceMatch/faceMatcher";
 
@@ -12,12 +12,60 @@ export interface VerifyIdentityOptions {
   /** Forwarded to runLivenessCheck - challengeCount, flipHeadTurnDirection, onEvent, onFrame, etc. */
   liveness?: RunLivenessCheckOptions;
   faceMatch?: { matchThreshold?: number };
+  /**
+   * Fired once, right after the liveness sequence ends, while this function waits
+   * (briefly) for the user to be facing the camera again before grabbing the frame used
+   * for face matching - see FACE_CAPTURE_WAIT below. There's no equivalent event from
+   * liveness.onEvent, since this happens after the challenge sequence itself is done.
+   */
+  onFaceCaptureStatus?: (message: string) => void;
 }
 
 export interface VerifyIdentityResult {
   idOcr: PhIdOcrResult;
   liveness: LivenessResult;
+  /** Whether the frame used for face matching was actually facing the camera when it was grabbed - see waitForFrontalFace. */
+  faceCapture: { centered: boolean; yawDeg: number; pitchDeg: number };
   faceMatch: FaceMatchOutcome;
+}
+
+// If the liveness sequence happens to end on a TURN_LEFT/TURN_RIGHT challenge, the frame
+// grabbed right after it finishes can be a profile view, which face-api can't produce a
+// good descriptor from - confirmed via real testing to cause a false "didn't match".
+// These bound how long verifyIdentity waits for the user to face forward again before
+// giving up and using whatever frame is available. Not yet tuned against real users -
+// generous enough that a normal "turn back to center" should comfortably finish inside
+// it, but this is a starting point like the other thresholds in this project.
+const FACE_CAPTURE_CENTER_THRESHOLD_DEG = 15;
+const FACE_CAPTURE_WAIT_TIMEOUT_MS = 4000;
+const FACE_CAPTURE_POLL_INTERVAL_MS = 80; // matches liveness's own default detection interval
+
+/**
+ * Polls the live video (reusing liveness's own MediaPipe-based yaw/pitch detection - no
+ * new model, no extra download) until the user is facing roughly forward, or the timeout
+ * elapses. Always resolves - on timeout, `centered` is false and the caller gets whatever
+ * the last frame's angles were, so the flow never hard-blocks on this.
+ */
+async function waitForFrontalFace(
+  video: HTMLVideoElement,
+  onStatus?: (message: string) => void
+): Promise<{ centered: boolean; yawDeg: number; pitchDeg: number }> {
+  onStatus?.("Look straight at the camera...");
+  const deadline = performance.now() + FACE_CAPTURE_WAIT_TIMEOUT_MS;
+  let last: FaceFrame | undefined;
+  while (performance.now() < deadline) {
+    const frame = await detectFace(video, performance.now());
+    last = frame;
+    if (
+      frame.faceDetected &&
+      Math.abs(frame.yawDeg) < FACE_CAPTURE_CENTER_THRESHOLD_DEG &&
+      Math.abs(frame.pitchDeg) < FACE_CAPTURE_CENTER_THRESHOLD_DEG
+    ) {
+      return { centered: true, yawDeg: frame.yawDeg, pitchDeg: frame.pitchDeg };
+    }
+    await new Promise((resolve) => setTimeout(resolve, FACE_CAPTURE_POLL_INTERVAL_MS));
+  }
+  return { centered: false, yawDeg: last?.yawDeg ?? 0, pitchDeg: last?.pitchDeg ?? 0 };
 }
 
 /**
@@ -31,9 +79,10 @@ export interface VerifyIdentityResult {
  *
  * `video` must already have a live camera stream started, OR be an empty <video> element
  * - this function calls startCamera/stopCamera around the liveness check itself, the same
- * way checkLiveness() does. The face-match step reads its live frame from `video` right
- * after the liveness sequence finishes (pass or fail) and before the camera stops, so no
- * extra capture step is needed.
+ * way checkLiveness() does. After the liveness sequence finishes (pass or fail), it briefly
+ * waits for the user to be facing the camera before grabbing the frame for face matching
+ * (see waitForFrontalFace) - the sequence's last challenge can be a head turn, and a
+ * profile-view frame doesn't give face-api anything usable to compare.
  *
  * Liveness passing/failing and the face match succeeding/failing are independent signals
  * - this function doesn't decide what "verified" means for your app. Check both fields of
@@ -66,13 +115,15 @@ export async function verifyIdentity(
   const { result } = runLivenessCheck(video, options.liveness);
   const liveness = await result;
 
+  const faceCapture = await waitForFrontalFace(video, options.onFaceCaptureStatus);
+
   await faceModelsReady;
   // video is still live here - grab the face match before stopping the camera.
   const faceMatch = await compareIdPhotoToLiveCapture(frontCanvas, video, options.faceMatch);
 
   stopCamera(video);
 
-  return { idOcr, liveness, faceMatch };
+  return { idOcr, liveness, faceCapture, faceMatch };
 }
 
 export { configureOrtWasmPaths, defaultModelConfig } from "./ocr/index";
